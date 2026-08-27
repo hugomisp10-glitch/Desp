@@ -282,6 +282,11 @@ canvas{max-width:100%}
       <p class="eyebrow">Total por produto</p>
       <div id="product-table"></div>
     </div>
+    <div class="card">
+      <p class="eyebrow">Produtos sem categoria</p>
+      <p class="text-soft text-sm">Escolhe uma categoria para cada produto — aplica-se a todas as despesas com esse nome (não só às filtradas acima).</p>
+      <div id="uncategorized-table" class="mt-12"></div>
+    </div>
   </section>
 
 </div>
@@ -1478,6 +1483,7 @@ function renderEstatisticas(){
   renderPie("chart-cat-stats", cats);
   renderCategoryLedger("cat-list-stats", cats);
   renderBarMonth("chart-month-stats", byMonthOf(eventId ? list : list)); // já filtrado acima
+  renderUncategorized(); // não depende dos filtros acima — mostra sempre tudo por categorizar
 
   const products = byProductOf(list).slice(0,50);
   const box = el("product-table"); clear(box);
@@ -1492,6 +1498,62 @@ function renderEstatisticas(){
     </tbody>`;
   box.appendChild(table);
 }
+
+// Agrupa despesas sem categoria por descrição (nome do produto), para que
+// classificar uma vez se aplique a todas as compras iguais de uma vez.
+function uncategorizedProducts(){
+  const map = new Map();
+  db.expenses.filter(e => !e.category_id).forEach(e=>{
+    const key = (e.description||"").trim().toLowerCase();
+    if (!key) return;
+    if (!map.has(key)) map.set(key, { name: e.description, count: 0, total: 0, ids: [] });
+    const row = map.get(key);
+    row.count += 1;
+    row.total += parseFloat(e.total_price) || 0;
+    row.ids.push(e.id);
+  });
+  return [...map.values()].sort((a,b)=> b.total - a.total);
+}
+
+function renderUncategorized(){
+  const box = el("uncategorized-table");
+  const rows = uncategorizedProducts();
+  clear(box);
+  if (!rows.length){
+    box.innerHTML = '<p class="empty">Todos os produtos já têm categoria 🎉</p>';
+    return;
+  }
+  const catOptions = db.categories.map(c=>`<option value="${c.id}">${escapeHtml(c.name)}</option>`).join("");
+  const table = document.createElement("table");
+  table.innerHTML = `
+    <thead><tr><th>Produto</th><th>Nº vezes</th><th style="text-align:right">Total</th><th>Categoria</th></tr></thead>
+    <tbody>${rows.map((r,i)=>`
+      <tr data-row="${i}">
+        <td>${escapeHtml(r.name)}</td>
+        <td class="mono">${r.count}</td>
+        <td class="mono" style="text-align:right;font-weight:600">${formatMoney(r.total)}</td>
+        <td><select data-assign="${i}" style="min-width:170px"><option value="">— escolher —</option>${catOptions}</select></td>
+      </tr>`).join("")}
+    </tbody>`;
+  box.appendChild(table);
+
+  table.querySelectorAll("[data-assign]").forEach(select=>{
+    select.addEventListener("change", ()=>{
+      const idx = parseInt(select.dataset.assign);
+      const categoryId = select.value ? parseInt(select.value) : null;
+      if (!categoryId) return;
+      const row = rows[idx];
+      db.expenses.forEach(e=>{
+        if (row.ids.includes(e.id)) e.category_id = categoryId;
+      });
+      saveDB();
+      renderUncategorized();
+      renderEstatisticas();
+      renderResumo();
+    });
+  });
+}
+
 
 /* =========================================================================
    CÓPIA DE SEGURANÇA (exportar / importar)
