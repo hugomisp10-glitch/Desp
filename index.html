@@ -145,6 +145,7 @@ canvas{max-width:100%}
     <div class="card">
       <p class="eyebrow">Últimos registos</p>
       <div id="recent-list" class="ledger"></div>
+      <button id="recent-more" class="btn btn-secondary btn-sm mt-12" style="display:none"></button>
     </div>
     <div class="card">
       <p class="eyebrow">Cópia de segurança</p>
@@ -157,6 +158,7 @@ canvas{max-width:100%}
         <button id="backup-export" class="btn btn-accent">⬇️ Exportar backup</button>
         <button id="backup-import-btn" class="btn btn-secondary">⬆️ Importar backup</button>
         <input id="backup-import-file" type="file" accept="application/json,.json" style="display:none" />
+        <button id="clear-history" class="btn btn-danger">🗑️ Apagar todas as despesas</button>
       </div>
       <p id="backup-status" class="status-msg"></p>
     </div>
@@ -567,6 +569,7 @@ function renderCategoryLedger(containerId, rows){
 /* =========================================================================
    RESUMO
 ========================================================================= */
+let recentLimit = 8;
 function renderResumo(){
   const list = db.expenses;
   const s = summaryOf(list);
@@ -579,7 +582,8 @@ function renderResumo(){
   renderCategoryLedger("cat-list-resumo", cats);
   renderBarMonth("chart-month-resumo", byMonthOf(list));
 
-  const recent = [...list].sort((a,b)=> (b.purchase_date||"").localeCompare(a.purchase_date||"") || b.id-a.id).slice(0,8);
+  const sorted = [...list].sort((a,b)=> (b.purchase_date||"").localeCompare(a.purchase_date||"") || b.id-a.id);
+  const recent = sorted.slice(0, recentLimit);
   const box = el("recent-list"); clear(box);
   if (!recent.length){ box.innerHTML = '<p class="empty">Ainda não há despesas registadas.</p>'; }
   recent.forEach(item=>{
@@ -588,11 +592,56 @@ function renderResumo(){
     row.innerHTML = `
       <span class="ledger-desc">${escapeHtml(item.description)} <span class="ledger-meta">· ${formatDate(item.purchase_date)}</span></span>
       <span class="ledger-leader"></span>
-      <span class="ledger-value">${formatMoney(item.total_price)}</span>`;
+      <span class="ledger-value">${formatMoney(item.total_price)}</span>
+      <button class="btn btn-danger btn-sm" data-delexp="${item.id}" title="Apagar despesa">×</button>`;
     box.appendChild(row);
   });
+  box.querySelectorAll("[data-delexp]").forEach(btn=>{
+    btn.addEventListener("click", ()=>{
+      const item = db.expenses.find(x=>x.id===parseInt(btn.dataset.delexp));
+      if (!confirm(`Apagar "${item?.description || "esta despesa"}" (${formatMoney(item?.total_price)})?`)) return;
+      db.expenses = db.expenses.filter(x=>x.id!==parseInt(btn.dataset.delexp));
+      saveDB();
+      renderResumo();
+    });
+  });
+
+  const moreBtn = el("recent-more");
+  if (sorted.length > recentLimit){
+    moreBtn.style.display = "inline-flex";
+    moreBtn.textContent = `Ver mais (${sorted.length - recentLimit} restantes)`;
+  } else {
+    moreBtn.style.display = "none";
+  }
 }
 function escapeHtml(s){ const d=document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
+
+el("recent-more").addEventListener("click", ()=>{
+  recentLimit += 20;
+  renderResumo();
+});
+
+el("clear-history").addEventListener("click", ()=>{
+  if (db.expenses.length === 0){
+    el("backup-status").textContent = "Já não há nenhuma despesa registada.";
+    el("backup-status").className = "status-msg text-soft";
+    return;
+  }
+  const first = confirm(
+    `Isto vai apagar TODAS as ${db.expenses.length} despesas registadas (de todos os eventos).\n\n` +
+    `As categorias e os eventos que criaste ficam guardados, só as despesas é que desaparecem.\n\n` +
+    `Esta ação não se pode desfazer. Continuar?`
+  );
+  if (!first) return;
+  const second = confirm("Tens mesmo a certeza? Última confirmação — vais perder todas as despesas.");
+  if (!second) return;
+  db.expenses = [];
+  recentLimit = 8;
+  saveDB();
+  renderResumo();
+  el("backup-status").textContent = "Histórico de despesas apagado.";
+  el("backup-status").className = "status-msg amount-pos";
+});
 
 /* =========================================================================
    REGISTO MANUAL
@@ -691,7 +740,21 @@ function extractLastMoney(line){
   return matches.length ? toFloatPT(matches[matches.length-1][0]) : null;
 }
 function findTotal(lines){
-  // 1ª passagem: só as etiquetas mais inequívocas ("Total a Pagar" / "Valor a Pagar")
+  // 1ª prioridade: o SUBTOTAL — reflete o valor real dos produtos, antes
+  // de descontos específicos do cartão/método de pagamento. É isso que
+  // interessa para acompanhar despesas (o "Total a Pagar" pode vir mais
+  // baixo por causa de um desconto do cartão, o que não é bem "gastaste
+  // menos" — só pagaste de forma diferente).
+  for (const line of lines){
+    const low = line.toLowerCase();
+    if (low.includes("subtotal")){
+      const v = extractLastMoney(line);
+      if (v !== null) return v;
+    }
+  }
+  // 2ª prioridade: quando não há SUBTOTAL separado (ex: sem desconto
+  // nenhum aplicado, o total já É o valor dos produtos), usa as etiquetas
+  // mais inequívocas de total final ("Total a Pagar" / "Valor a Pagar").
   for (const line of lines){
     const low = line.toLowerCase();
     if (TOTAL_EXCLUDE.some(k=>low.includes(k))) continue;
@@ -700,8 +763,7 @@ function findTotal(lines){
       if (v !== null) return v;
     }
   }
-  // 2ª passagem: palavras mais genéricas ("total", "montante"), continuando a
-  // ignorar linhas de quantidade/subtotal
+  // 3ª prioridade: palavras mais genéricas ("total", "montante")
   for (const line of lines){
     const low = line.toLowerCase();
     if (TOTAL_EXCLUDE.some(k=>low.includes(k))) continue;
